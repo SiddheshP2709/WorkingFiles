@@ -1,62 +1,75 @@
-# model_utils.py
+import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import re
+from torch.serialization import safe_globals
 
-# ------------------ Model Definition ------------------
+# -------------------------------
+# Define your Model Architecture
+# -------------------------------
 class Next_Word_Predictor(nn.Module):
-    def __init__(self, size, vocab_size, embed_dim, hidden_dim, activation_fn, seed_value):
-        super().__init__()
-        torch.manual_seed(seed_value)
-        self.size = size
-        self.embed = nn.Embedding(vocab_size, embed_dim)
-        self.linear1 = nn.Linear(size * embed_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, vocab_size)
-        self.activation_fn = torch.relu if activation_fn == "relu" else torch.sigmoid
+    def __init__(self, vocab_size, embed_dim=64, hidden_dim=128):
+        super(Next_Word_Predictor, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
 
-    def forward(self, x):
-        x = self.embed(x)
-        x = x.view(x.shape[0], -1)
-        x = self.linear1(x)
-        x = self.activation_fn(x)
-        x = self.linear2(x)
-        return x
+    def forward(self, x, hidden=None):
+        embeds = self.embedding(x)
+        output, hidden = self.lstm(embeds, hidden)
+        logits = self.fc(output[:, -1, :])
+        return logits, hidden
 
 
-# ------------------ Load Pretrained Model ------------------
+# -------------------------------
+# Load Pretrained Model Function
+# -------------------------------
 def load_pretrained_model(model_path):
     try:
-        model = torch.load(model_path, map_location=torch.device("cpu"))
+        if not os.path.exists(model_path):
+            print(f"❌ Model file not found: {os.path.abspath(model_path)}")
+            return None
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        with safe_globals([Next_Word_Predictor]):
+            model = torch.load(model_path, map_location=device, weights_only=False)
+
+        model.to(device)
         model.eval()
+        print("✅ Model loaded successfully!")
         return model
+
     except Exception as e:
-        print(f"Error loading model: {e}")
+        import traceback
+        print("❌ Error loading model:", e)
+        traceback.print_exc()
         return None
 
 
-# ------------------ Text Generation Function ------------------
-def generate_next_words(model, itos, stoi, content, seed_value, k, temperature=1):
+# -------------------------------
+# Generate Next Words Function
+# -------------------------------
+def generate_next_words(model, itos, stoi, content, seed_value, k, temperature=1.0):
     torch.manual_seed(seed_value)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = next(model.parameters()).device
 
-    size = model.size
-    predata = content.lower()
-    predata = re.sub(r'[^a-zA-Z0-9 \.]', '', predata)
-    predata = re.sub(r'\.', ' . ', predata)
-    wordsNew = predata.split()
+    text = content.lower()
+    text = re.sub(r"[^a-zA-Z0-9 \.]", "", text)
+    words = text.split()
 
-    predata = [stoi[w] for w in wordsNew if w in stoi]
-    if len(predata) <= size:
-        predata = [0] * (size - len(predata)) + predata
-    else:
-        predata = predata[-size:]
+    for _ in range(k):
+        # Prepare input tensor
+        input_ids = torch.tensor([[stoi.get(w, 0) for w in words[-5:]]], dtype=torch.long).to(device)
 
-    for i in range(k):
-        x = torch.tensor(predata).view(1, -1).to(device)
-        y_pred = model(x)
-        logits = y_pred / temperature
-        word1 = torch.distributions.categorical.Categorical(logits=logits).sample().item()
-        word = itos[word1]
-        content += " " + word
-        predata = predata[1:] + [word1]
-    return content
+        with torch.no_grad():
+            logits, _ = model(input_ids)
+            logits = logits / temperature
+            probs = F.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, num_samples=1).item()
+            next_word = itos.get(next_id, "<unk>")
+
+        words.append(next_word)
+
+    return " ".join(words)
