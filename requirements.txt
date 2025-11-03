@@ -1,6 +1,5 @@
-streamlit==1.39.0
-torch==2.2.0+cpu
-torchvision==0.17.0+cpu
-torchaudio==2.2.0+cpu
--f https://download.pytorch.org/whl/torch_stable.html
-regex
+python-3.10
+streamlit==1.51.0
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
